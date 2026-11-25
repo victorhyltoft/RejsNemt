@@ -35,6 +35,7 @@ export function departures(tt: Timetable, station: number, timeMs: number, windo
             headsign: P.headsign[p],
             time: base + d * 1000,
             platform: tt.j.stops.platform[s] || undefined,
+            where: tt.stopWhere(s),
             stop: s,
             pattern: p,
             idx: i,

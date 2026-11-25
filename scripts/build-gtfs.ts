@@ -263,6 +263,18 @@ async function main() {
     if (!list) { list = []; byNameCell.set(k, list); }
     list.push(i);
   }
+  const keyStop = (key: string) => (key.startsWith("P:") ? stopRow[stopIdx.get(key.slice(2))!] : stopRow[gStops[+key.slice(2)]]);
+
+  const stopModes = new Array<number>(S).fill(0);
+  for (const p of patterns.values()) {
+    const r = routeRow.get(p.route);
+    const bit = MODE_BIT[modeFromRouteType(r ? r.type : 3, r?.short)];
+    for (const s of p.stops) stopModes[s] |= bit;
+  }
+  const hubs = mergeHubs(stationKey, (k) => cleanName(keyStop(k).name), sLat, sLon, stopModes);
+  for (let i = 0; i < S; i++) stationKey[i] = hubs.remap.get(stationKey[i]) ?? stationKey[i];
+  console.log(`hubs: merged ${hubs.remap.size} stations into ${hubs.names.size} hubs`);
+
   const stIdx = new Map<string, number>();
   const stationOf: number[] = new Array(S);
   const st = { id: [] as string[], name: [] as string[], lat: [] as number[], lon: [] as number[], stops: [] as number[][], modes: [] as number[], routes: [] as number[][] };
@@ -271,9 +283,9 @@ async function main() {
     if (k === undefined) {
       k = st.id.length;
       stIdx.set(stationKey[i], k);
-      const pk = stationKey[i].startsWith("P:") ? stopRow[stopIdx.get(stationKey[i].slice(2))!] : null;
-      st.id.push(pk ? pk.id : sId[i]);
-      st.name.push(cleanName(pk ? pk.name : sName[i]));
+      const ks = keyStop(stationKey[i]);
+      st.id.push(ks.id);
+      st.name.push(hubs.names.get(stationKey[i]) ?? cleanName(ks.name));
       st.lat.push(0); st.lon.push(0); st.stops.push([]); st.modes.push(0); st.routes.push([]);
     }
     stationOf[i] = k;
@@ -462,6 +474,78 @@ async function main() {
 }
 
 const MODE_ORDER: Record<Mode, number> = { stog: 0, metro: 1, letbane: 2, tog: 3, bus: 4, faerge: 5 };
+
+const RAIL_BITS = MODE_BIT.stog | MODE_BIT.metro | MODE_BIT.letbane | MODE_BIT.tog;
+/** Same base name ("Lyngby St." / "Lyngby St. (Letbane)"). */
+const HUB_RADIUS_M = 400;
+/** Base names that only match once "St." is ignored ("Kirkebjerg (Letbane)" / "Kirkebjerg St. (Park Allé)"):
+ * street-named bus stops further along the road share those, so stay closer. */
+const HUB_LOOSE_RADIUS_M = 200;
+const HUB_ALIAS: Record<string, string> = { "cph lufthavn": "københavns lufthavn" };
+const hubBase = (n: string) => n.replace(/(\s*\([^)]*\))+\s*$/, "").trim().toLowerCase();
+const hubLoose = (base: string) => {
+  const b = base.replace(/\s+(st\.?|station)$/, "");
+  return HUB_ALIAS[b] ?? b;
+};
+const KIND_SUFFIX = /\s*\((metro|letbane|s-tog|tog|togbus|bus)\)\s*$/i;
+
+/**
+ * Rejseplanen names the parts of one interchange differently ("Lyngby St.", "Lyngby St. (Letbane)",
+ * "Lyngby St. (Jernbanepladsen)"), so the name-based grouping above keeps them apart. Merge every
+ * station that shares a rail station's base name and lies near it. Bus-only look-alikes
+ * ("Hovedgaden (A)" / "Hovedgaden (B)") are left alone.
+ * Returns old key → hub key, and the display name of each hub.
+ */
+function mergeHubs(keys: string[], nameOf: (key: string) => string, lat: number[], lon: number[], modes: number[]) {
+  type Agg = { key: string; name: string; base: string; la: number; lo: number; n: number; m: number };
+  const agg = new Map<string, Agg>();
+  keys.forEach((k, i) => {
+    let a = agg.get(k);
+    if (!a) { const name = nameOf(k); a = { key: k, name, base: hubBase(name), la: 0, lo: 0, n: 0, m: 0 }; agg.set(k, a); }
+    a.la += lat[i]; a.lo += lon[i]; a.n++; a.m |= modes[i];
+  });
+  const byBase = new Map<string, Agg[]>();
+  for (const a of agg.values()) {
+    a.la /= a.n; a.lo /= a.n;
+    const b = hubLoose(a.base);
+    if (!b) continue;
+    let l = byBase.get(b);
+    if (!l) { l = []; byBase.set(b, l); }
+    l.push(a);
+  }
+  const remap = new Map<string, string>();
+  const names = new Map<string, string>();
+  const near = (a: Agg, b: Agg) => haversine(a.la, a.lo, b.la, b.lo) < (a.base === b.base ? HUB_RADIUS_M : HUB_LOOSE_RADIUS_M);
+  for (const list of byBase.values()) {
+    if (list.length < 2) continue;
+    const rails = list.filter((a) => a.m & RAIL_BITS);
+    if (!rails.length) continue;
+    const parent = rails.map((_, i) => i);
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    for (let i = 0; i < rails.length; i++) for (let j = i + 1; j < rails.length; j++) if (near(rails[i], rails[j])) parent[find(j)] = find(i);
+    const members = new Map<number, Agg[]>();
+    rails.forEach((a, i) => { const r = find(i); members.set(r, [...(members.get(r) || []), a]); });
+    for (const a of list) {
+      if (a.m & RAIL_BITS) continue;
+      let best = -1, bd = Infinity;
+      rails.forEach((r, i) => {
+        const d = haversine(a.la, a.lo, r.la, r.lo);
+        if (near(a, r) && d < bd) { bd = d; best = i; }
+      });
+      if (best >= 0) members.get(find(best))!.push(a);
+    }
+    for (const group of members.values()) {
+      if (group.length < 2) continue;
+      // Name the hub after its plainest rail station: "Lyngby St." over "Lyngby St. (Letbane)".
+      const plain = (a: Agg) => +(a.name.replace(KIND_SUFFIX, "").trim().toLowerCase() !== a.base);
+      const hub = group.filter((a) => a.m & RAIL_BITS).sort((a, b) => plain(a) - plain(b) || +/\(/.test(a.name) - +/\(/.test(b.name) || b.n - a.n)[0];
+      names.set(hub.key, hub.name.replace(KIND_SUFFIX, "").trim());
+      for (const a of group) if (a !== hub) remap.set(a.key, hub.key);
+      if (process.env.HUB_DEBUG) console.log(`  hub ${names.get(hub.key)} <= ${group.filter((a) => a !== hub).map((a) => `${a.name} ${Math.round(haversine(a.la, a.lo, hub.la, hub.lo))}m`).join("; ")}`);
+    }
+  }
+  return { remap, names };
+}
 
 function simplify(pts: [number, number][], tol: number): [number, number][] {
   if (pts.length < 3) return pts;
