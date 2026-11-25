@@ -39,15 +39,30 @@ const MODE_DEFAULT: Record<Mode, [string, string]> = {
   metro: ["#00814F", "#FFFFFF"],
   letbane: ["#00A19A", "#FFFFFF"],
   tog: ["#4B5563", "#FFFFFF"],
-  bus: ["#2A5CAA", "#FFFFFF"],
+  bus: ["#FFC20E", "#111111"],
   faerge: ["#0E7490", "#FFFFFF"],
+};
+
+/** Movia's scheme: A-buses red, S-buses blue, C-buses light blue, E-buses green, every other bus yellow. */
+const BUS_SUFFIX: Record<string, [string, string]> = {
+  A: ["#E2001A", "#FFFFFF"],
+  S: ["#0072BC", "#FFFFFF"],
+  C: ["#00A3E0", "#FFFFFF"],
+  E: ["#2E7D32", "#FFFFFF"],
 };
 
 export function lineColors(short: string, mode: Mode, color?: string, text?: string): [string, string] {
   if (KNOWN[short] && (mode === "stog" || mode === "metro")) return KNOWN[short];
-  if (color && /^[0-9a-f]{6}$/i.test(color) && color.toUpperCase() !== "FFFFFF")
-    return ["#" + color, text && /^[0-9a-f]{6}$/i.test(text) ? "#" + text : "#FFFFFF"];
-  if (mode === "bus" && /A$/.test(short)) return ["#F5B700", "#111111"];
-  if (mode === "bus" && /E$/.test(short)) return ["#2E7D32", "#FFFFFF"];
+  if (mode === "bus") return BUS_SUFFIX[/[ASCE]$/.exec(short)?.[0] ?? ""] ?? MODE_DEFAULT.bus;
+  if (color && /^[0-9a-f]{6}$/i.test(color) && color.toUpperCase() !== "FFFFFF") {
+    // Some feed routes (803/804/806) give the same colour for text and background.
+    const ok = text && /^[0-9a-f]{6}$/i.test(text) && text.toUpperCase() !== color.toUpperCase();
+    return ["#" + color, ok ? "#" + text : luminance(color) > 0.55 ? "#111111" : "#FFFFFF"];
+  }
   return MODE_DEFAULT[mode];
+}
+
+function luminance(hex: string) {
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  return 0.299 * r + 0.587 * g + 0.114 * b;
 }

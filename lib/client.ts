@@ -44,7 +44,7 @@ export const api = {
   lineVehicles: (route: number) => get<{ vehicles: VehicleTrip[] }>(`/api/line?route=${route}&v=1`),
   alternatives: (from: number, to: number, after: number) =>
     get<{ options: { leg: TransitLeg; rt: Realtime | null }[] }>(`/api/alternatives?from=${from}&to=${to}&after=${Math.round(after)}`),
-  departures: (station: number) => get<{ departures: Departure[]; now: number }>(`/api/departures?station=${station}`),
+  departures: (station: number, limit?: number) => get<{ departures: Departure[]; now: number }>(`/api/departures?station=${station}${limit ? `&limit=${limit}` : ""}`),
   vehicles: (bbox: number[]) => get<{ vehicles: VehicleTrip[]; tooLarge?: boolean; now: number }>(`/api/vehicles?bbox=${bbox.map((x) => x.toFixed(4)).join(",")}`),
   trip: (id: string, date: string) => get<{ trip: VehicleTrip }>(`/api/trip?id=${encodeURIComponent(id)}&date=${date}`),
   rt: (keys: string[]) => get<{ rt: Record<string, Realtime | null> }>(`/api/rt?trips=${keys.map(encodeURIComponent).join(",")}`),
@@ -152,9 +152,35 @@ export function localFromMs(ms: number) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+/** Re-find a station saved in localStorage. Indices change when the timetable is rebuilt, and a stop that
+ * has since been merged into a hub ("Lyngby St. (Letbane)") is found under the hub's name ("Lyngby St."). */
+export function findStation(list: Station[], r: { i: number; n: string } | null): Station | null {
+  if (!r) return null;
+  if (list[r.i]?.n === r.n) return list[r.i];
+  const exact = list.find((x) => x.n === r.n);
+  if (exact) return exact;
+  const base = r.n.replace(/(\s*\([^)]*\))+\s*$/, "").trim();
+  return base && base !== r.n ? list.find((x) => x.n === base) ?? null : null;
+}
+
+/** Whether we may ask for the position without a tap. iOS home-screen apps report "prompt" on every
+ * launch even after the user said yes, so fall back to remembering that they allowed it before. */
+export async function geoAllowed(): Promise<boolean> {
+  try {
+    const s = await navigator.permissions?.query({ name: "geolocation" as PermissionName });
+    if (s?.state === "granted") return true;
+    if (s?.state === "denied") return false;
+  } catch {}
+  return ld<boolean>("geo", false);
+}
+
 export function locate(): Promise<[number, number]> {
   return new Promise((ok, fail) => {
     if (!navigator.geolocation) return fail(new Error("no geolocation"));
-    navigator.geolocation.getCurrentPosition((p) => ok([p.coords.latitude, p.coords.longitude]), fail, { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+    navigator.geolocation.getCurrentPosition(
+      (p) => { sv("geo", true); ok([p.coords.latitude, p.coords.longitude]); },
+      (e) => { if (e.code === e.PERMISSION_DENIED) sv("geo", false); fail(e); },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+    );
   });
 }

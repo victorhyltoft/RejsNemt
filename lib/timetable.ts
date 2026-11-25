@@ -107,6 +107,17 @@ export class Timetable {
     return this.j.stations.name[this.j.stops.station[s]];
   }
 
+  /** Which part of a merged hub a stop is, e.g. "Jernbanepladsen" for "Lyngby St. (Jernbanepladsen)". */
+  stopWhere(s: number): string | undefined {
+    const own = this.j.stops.name[s], st = this.stationName(s);
+    if (own === st) return undefined;
+    const m = own.match(/\(([^()]*)\)\s*$/);
+    if (!m) return undefined;
+    if (/^togbus$/i.test(m[1])) return "Togbus";
+    if (/^(metro|letbane|s-tog|tog|bus)$/i.test(m[1])) return undefined;
+    return m[1];
+  }
+
   shapePoints(p: number, fromIdx = 0, toIdx = -1): [number, number][] {
     const P = this.j.patterns;
     const sh = P.shape[p];

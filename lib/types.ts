@@ -13,6 +13,7 @@ export interface StopRef {
   lat: number;
   lon: number;
   platform?: string;
+  where?: string;
 }
 
 export interface TransitLeg {
@@ -56,6 +57,7 @@ export interface Departure {
   headsign: string;
   time: number;
   platform?: string;
+  where?: string;
   stop: number;
   pattern: number;
   idx: number;

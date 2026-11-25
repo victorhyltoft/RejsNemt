@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NetworkJson } from "@/lib/format";
 import type { Departure, Itinerary, Realtime, TransitLeg } from "@/lib/types";
 import { MODE_LABEL, type Mode } from "@/lib/modes";
-import { api, distKm, distTxt, dur, fmt, ld, loadNetwork, localFromMs, localParam, locate, mins, nearby, placeName, rtKey, rtStatus, searchStations, sv, until, walkTxt, type Place, type Station } from "@/lib/client";
+import { api, distKm, distTxt, dur, findStation, fmt, ld, loadNetwork, localFromMs, localParam, locate, mins, nearby, placeName, rtKey, rtStatus, searchStations, sv, until, walkTxt, type Place, type Station } from "@/lib/client";
 import { RtIcon } from "./RtIcon";
 import { Icon, modeIcon } from "./Icons";
 import { LineBadge } from "./LineBadge";
@@ -25,7 +25,7 @@ const samePlace = (a: Ref, b: Ref) => (a.i >= 0 || b.i >= 0 ? a.i === b.i : !!a.
 type Pair = { from: Ref; to: Ref };
 type Sheet = { type: "st"; f: "from" | "to" | "board" | "home" | "work" } | { type: "time" } | null;
 
-const POPULAR = ["København H", "Nørreport", "Lyngby", "DTU", "Kongens Nytorv", "Østerport", "Lufthavnen", "Hellerup", "Roskilde"];
+const POPULAR = ["København H", "Nørreport", "Lyngby", "DTU", "Kongens Nytorv", "Østerport", "Lufthavnen", "CPH Lufthavn", "Hellerup", "Roskilde"];
 
 function greet() {
   const h = new Date().getHours();
@@ -84,11 +84,11 @@ export default function App() {
     return () => window.removeEventListener("afsted-toast", h);
   }, [toast]);
 
+  const restored = useRef(false);
   useEffect(() => {
     loadNetwork().then((n) => {
       const fix = (r: Ref | null) => {
-        if (!r) return null;
-        const s = n.stations[r.i]?.n === r.n ? n.stations[r.i] : n.stations.find((x) => x.n === r.n);
+        const s = findStation(n.stations, r);
         return s ? { i: s.i, n: s.n } : null;
       };
       const fixPair = (p: Pair) => {
@@ -97,11 +97,20 @@ export default function App() {
       };
       setNet(n);
       setFrom(fix(ld("from", null)));
-      setBoard(fix(ld("board", null)) || fix({ i: -1, n: "Nørreport" }) || { i: n.stations[0].i, n: n.stations[0].n });
+      setBoard(fix(ld("board", null)) || fix({ i: -1, n: "Nørreport St." }) || fix({ i: -1, n: "Nørreport" }) || { i: n.stations[0].i, n: n.stations[0].n });
       setSaved(ld<Pair[]>("saved", []).map(fixPair).filter(Boolean) as Pair[]);
       setRecent(ld<Pair[]>("recent", []).map(fixPair).filter(Boolean) as Pair[]);
       const f = ld<{ home: Ref | null; work: Ref | null }>("favs", { home: null, work: null });
       setFavs({ home: fix(f.home), work: fix(f.work) });
+      const lastFrom = fix(ld("from", null)), lastTo = fix(ld("to", null));
+      setTo(lastTo);
+      setBmode(ld<"all" | Mode>("bmode", "all"));
+      const h = ld<{ ll: [number, number]; at: number } | null>("here", null);
+      if (h) setHere({ ll: h.ll, label: Date.now() - h.at < 15 * 60e3 ? "dig" : "din seneste position" });
+      const v = ld<View>("view", "home");
+      if ((v === "results" || v === "detail") && lastFrom && lastTo && lastFrom.i !== lastTo.i) search(lastFrom, lastTo, { time: null, mode: "dep" });
+      else if (v === "map" || v === "deps" || v === "saved") setView(v);
+      restored.current = true;
     }).catch(() => setNetErr(true));
     const t = ld<"light" | "dark" | null>("theme", null) ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     setTheme(t);
@@ -110,6 +119,17 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    if (restored.current) sv("view", view);
+  }, [view]);
+  useEffect(() => {
+    if (restored.current) sv("bmode", bmode);
+  }, [bmode]);
+  const onLocate = useCallback((ll: [number, number]) => {
+    setHere({ ll, label: "dig" });
+    sv("here", { ll, at: Date.now() });
+  }, []);
 
   const stationById = useCallback((i: number) => net?.stations[i], [net]);
   const ref = (s: Station): Ref => ({ i: s.i, n: s.n });
@@ -144,6 +164,7 @@ export default function App() {
         return n;
       });
       if (f.i >= 0) sv("from", f);
+      if (t.i >= 0) sv("to", t);
     },
     [from, to, mode, time, day, toast],
   );
@@ -214,6 +235,7 @@ export default function App() {
     if (f === "board") {
       setBoard(r);
       sv("board", r);
+      setBmode("all");
     }
     if (f === "home" || f === "work") {
       const n = { ...favs, [f]: r };
@@ -311,7 +333,7 @@ export default function App() {
               if (st) setFocus([st.la, st.lo]);
             }}
             onClose={() => setMapSel(null)}
-            onLocate={(ll) => setHere({ ll, label: "dig" })}
+            onLocate={onLocate}
             onFrom={(i) => { const s = ref(stationById(i)!); setFrom(s); if (to && to.i !== s.i) search(s, to); else setView("home"); }}
             onTo={(i) => { const s = ref(stationById(i)!); setTo(s); if (from && from.i !== s.i) search(from, s); else setView("home"); }}
           />
@@ -611,7 +633,7 @@ function Detail(p: { it: Itinerary; from: Ref; to: Ref; rt: Record<string, Realt
                 <div className="st">
                   <div className="tm">{dl >= 60 ? <>{fmt(l.dep + dl * 1000)}<s>{fmt(l.dep)}</s></> : fmt(l.dep)}</div>
                   <div className="nd"><span className="rail" style={{ background: c, top: 22, bottom: 0 }} /><span className="node" style={{ borderColor: c }} /></div>
-                  <div className="nm"><b>{l.from.name}</b><span>{[r?.track ? `Spor ${r.track}` : l.from.platform ? `Spor ${l.from.platform}` : "", k === 0 ? until(l.dep + dl * 1000, now) : ""].filter(Boolean).join(" · ")}</span></div>
+                  <div className="nm"><b>{l.from.name}</b><span>{[l.from.where, r?.track ? `Spor ${r.track}` : l.from.platform ? `Spor ${l.from.platform}` : "", k === 0 ? until(l.dep + dl * 1000, now) : ""].filter(Boolean).join(" · ")}</span></div>
                 </div>
                 <div className="ride">
                   <div /><div className="nd"><span className="rail" style={{ background: c }} /></div>
@@ -630,7 +652,7 @@ function Detail(p: { it: Itinerary; from: Ref; to: Ref; rt: Record<string, Realt
                 <div className="st">
                   <div className="tm">{fmt(l.arr + dl * 1000)}</div>
                   <div className="nd"><span className="rail" style={{ background: c, top: 0, height: 16 }} /><span className="node" style={{ borderColor: c, background: isLast ? c : undefined }} /></div>
-                  <div className="nm"><b>{l.to.name}</b><span>{isLast ? "Destination" : l.to.platform ? `Spor ${l.to.platform}` : "Stå af"}</span></div>
+                  <div className="nm"><b>{l.to.name}</b><span>{[isLast ? "Destination" : l.to.platform ? `Spor ${l.to.platform}` : "Stå af", l.to.where].filter(Boolean).join(" · ")}</span></div>
                 </div>
               </div>
             );
@@ -645,17 +667,17 @@ function Detail(p: { it: Itinerary; from: Ref; to: Ref; rt: Record<string, Realt
   );
 }
 
-function useDepartures(station: number | null) {
+function useDepartures(station: number | null, limit?: number) {
   const [deps, setDeps] = useState<Departure[] | null>(null);
   useEffect(() => {
     if (station == null) return;
     let live = true;
     setDeps(null);
-    const load = () => api.departures(station).then((r) => live && setDeps(r.departures)).catch(() => live && setDeps([]));
+    const load = () => api.departures(station, limit).then((r) => live && setDeps(r.departures)).catch(() => live && setDeps([]));
     load();
     const t = setInterval(load, 30000);
     return () => { live = false; clearInterval(t); };
-  }, [station]);
+  }, [station, limit]);
   return deps;
 }
 
@@ -668,7 +690,7 @@ function DepRow({ d, now, onLine }: { d: Departure; now: number; onLine?: OpenLi
       <div className="lbw"><LineBadge r={d.route} onClick={onLine ? () => onLine({ pattern: d.pattern, tripId: d.tripId, date: d.serviceDate }) : undefined} /></div>
       <div className="t">
         <b>{d.headsign}</b>
-        <span className="ii"><Icon name={modeIcon(d.route.mode)} />{[MODE_LABEL[d.route.mode], track ? `Spor ${track}` : ""].filter(Boolean).join(" · ")}</span>
+        <span className="ii"><Icon name={modeIcon(d.route.mode)} />{[MODE_LABEL[d.route.mode], track ? `Spor ${track}` : "", d.where].filter(Boolean).join(" · ")}</span>
       </div>
       <div className="when">
         {d.rt?.cancelled ? <b className="late">Aflyst</b> : <b className={m <= 1 ? "soon" : ""}>{m <= 0 ? "Nu" : `${m} min`}</b>}
@@ -679,10 +701,12 @@ function DepRow({ d, now, onLine }: { d: Departure; now: number; onLine?: OpenLi
 }
 
 function Deps(p: { board: Ref; bmode: "all" | Mode; onLine: OpenLine; onMode: (m: "all" | Mode) => void; onPick: () => void; onMap: () => void }) {
-  const deps = useDepartures(p.board.i);
+  const deps = useDepartures(p.board.i, 60);
   const now = useNow(10000);
   const modes = [...new Set((deps || []).map((d) => d.route.mode))];
-  const list = (deps || []).filter((d) => (p.bmode === "all" || d.route.mode === p.bmode) && d.time + (d.rt?.delay ?? 0) * 1000 > now - 60e3).sort((a, b) => a.time + (a.rt?.delay ?? 0) * 1000 - b.time - (b.rt?.delay ?? 0) * 1000).slice(0, 30);
+  // A remembered filter for a mode this station doesn't have would hide everything.
+  const bmode = p.bmode !== "all" && deps?.length && !modes.includes(p.bmode) ? "all" : p.bmode;
+  const list = (deps || []).filter((d) => (bmode === "all" || d.route.mode === bmode) && d.time + (d.rt?.delay ?? 0) * 1000 > now - 60e3).sort((a, b) => a.time + (a.rt?.delay ?? 0) * 1000 - b.time - (b.rt?.delay ?? 0) * 1000).slice(0, 30);
   const live = (deps || []).some((d) => d.rt?.source === "api");
   return (
     <>
@@ -692,8 +716,8 @@ function Deps(p: { board: Ref; bmode: "all" | Mode; onLine: OpenLine; onMode: (m
         <button className="icon-btn soft" style={{ marginRight: 12 }} onClick={p.onMap} aria-label="Vis på kort"><Icon name="map" /></button>
       </div>
       <div className="chips" style={{ margin: "14px 0" }}>
-        <button className={"chip" + (p.bmode === "all" ? " on" : "")} onClick={() => p.onMode("all")}><Icon name="list" className="ci" />Alle</button>
-        {modes.map((m) => <button key={m} className={"chip" + (p.bmode === m ? " on" : "")} onClick={() => p.onMode(m)}><Icon name={modeIcon(m)} className="ci" />{MODE_LABEL[m]}</button>)}
+        <button className={"chip" + (bmode === "all" ? " on" : "")} onClick={() => p.onMode("all")}><Icon name="list" className="ci" />Alle</button>
+        {modes.map((m) => <button key={m} className={"chip" + (bmode === m ? " on" : "")} onClick={() => p.onMode(m)}><Icon name={modeIcon(m)} className="ci" />{MODE_LABEL[m]}</button>)}
       </div>
       <div className="card list fadein">
         {deps === null ? <div className="empty"><div className="spin" /></div> : list.length ? list.map((d) => <DepRow key={d.tripId + d.serviceDate} d={d} now={now} onLine={p.onLine} />) : <div className="empty"><b>Ingen afgange de næste 2 timer</b></div>}
@@ -721,7 +745,7 @@ function MapView(p: {
       ) : (
         <div className="top"><div><div className="hello">Busser og tog i realtid</div><h1>Kort</h1></div></div>
       )}
-      <LiveMap network={p.net} theme={p.theme} height="min(56vh,480px)" mode="explore" focus={p.focus} onStation={p.onSel} onLocate={p.onLocate} onLine={p.onLine} onPoint={p.onPoint} pins={p.pins} />
+      <LiveMap network={p.net} theme={p.theme} height="min(56vh,480px)" mode="explore" focus={p.focus} start={p.here?.ll} autoLocate onStation={p.onSel} onLocate={p.onLocate} onLine={p.onLine} onPoint={p.onPoint} pins={p.pins} />
       <div className="legend"><span><RtIcon rt={{ live: true, delay: 0, at: 0, source: "api" }} sm />Live-data</span><span><RtIcon sm />Kun køreplan</span><span>Tryk for at sætte en nål</span></div>
       {p.drop && !s ? (
         <div className="card spanel fadein">
@@ -818,7 +842,7 @@ function StationSheet(p: { net: NetworkJson; f: string; favs: { home: Ref | null
     const t = setTimeout(() => inp.current?.focus(), 60);
     return () => clearTimeout(t);
   }, []);
-  const byName = (n: string) => p.net.stations.find((s) => s.n === n);
+  const byName = (n: string) => p.net.stations.find((s) => s.n === n) || p.net.stations.find((s) => s.n === n + " St.");
   const results = q.trim() ? searchStations(p.net.stations, q) : [];
   const title = ({ from: "Fra", to: "Til", board: "Station", home: "Hjem", work: "Arbejde" } as Record<string, string>)[p.f];
   const routes = p.net.routes;

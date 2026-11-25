@@ -9,7 +9,7 @@ interface Shift { day: number; ymd: string; shift: number }
 
 export function stopRef(tt: Timetable, s: number): StopRef {
   const st = tt.j.stops.station[s];
-  return { station: st, name: tt.j.stations.name[st], lat: tt.j.stops.lat[s], lon: tt.j.stops.lon[s], platform: tt.j.stops.platform[s] || undefined };
+  return { station: st, name: tt.j.stations.name[st], lat: tt.j.stops.lat[s], lon: tt.j.stops.lon[s], platform: tt.j.stops.platform[s] || undefined, where: tt.stopWhere(s) };
 }
 
 function earliestTrip(tt: Timetable, p: number, i: number, t: number, shifts: Shift[]) {

@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Map as MbMap, GeoJSONSource, Popup } from "mapbox-gl";
 import type { NetworkJson } from "@/lib/format";
 import type { Itinerary, Realtime, VehicleTrip } from "@/lib/types";
-import { api, fmt, geoOf, patternGeos, rtKey, rtStatus } from "@/lib/client";
+import { api, fmt, geoAllowed, geoOf, patternGeos, rtKey, rtStatus, sv } from "@/lib/client";
 import { positionAt } from "@/lib/vehicle-position";
 import { MODE_LABEL } from "@/lib/modes";
 import { rtIconHtml } from "./RtIcon";
@@ -25,6 +25,10 @@ export interface LiveMapProps {
   itinerary?: Itinerary | null;
   rt?: Record<string, Realtime | null>;
   focus?: [number, number] | null;
+  /** Where to open the map when there is no focus, e.g. the last known position. */
+  start?: [number, number] | null;
+  /** Find the user on open, if they have allowed location before. */
+  autoLocate?: boolean;
   selectedStation?: number | null;
   onStation?: (i: number) => void;
   onLocate?: (ll: [number, number]) => void;
@@ -78,11 +82,12 @@ export default function LiveMap(p: LiveMapProps) {
       if (disposed || !el.current) return;
       mapboxgl.accessToken = TOKEN;
       const net = props.current.network;
+      const at = props.current.focus || props.current.start;
       const map = new mapboxgl.Map({
         container: el.current,
         style: props.current.theme === "dark" ? "mapbox://styles/mapbox/dark-v11" : "mapbox://styles/mapbox/light-v11",
-        center: props.current.focus ? [props.current.focus[1], props.current.focus[0]] : [12.5683, 55.6761],
-        zoom: props.current.focus ? 14 : 11.5,
+        center: at ? [at[1], at[0]] : [12.5683, 55.6761],
+        zoom: at ? 14 : 11.5,
         attributionControl: true,
         pitchWithRotate: false,
       });
@@ -93,7 +98,13 @@ export default function LiveMap(p: LiveMapProps) {
       map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), "top-right");
       const geo = new mapboxgl.GeolocateControl({ positionOptions: { enableHighAccuracy: true }, trackUserLocation: true, showUserHeading: true });
       map.addControl(geo, "top-right");
-      geo.on("geolocate", (e: any) => props.current.onLocate?.([e.coords.latitude, e.coords.longitude]));
+      geo.on("geolocate", (e: any) => {
+        sv("geo", true);
+        props.current.onLocate?.([e.coords.latitude, e.coords.longitude]);
+      });
+      geo.on("error", (e: any) => {
+        if (e?.code === 1) sv("geo", false);
+      });
 
       const stationsFc = {
         type: "FeatureCollection" as const,
@@ -310,11 +321,20 @@ export default function LiveMap(p: LiveMapProps) {
         const v = k && vehicles.current.get(k);
         if (!v) return;
         selected.current = k;
-        popup.current?.remove();
-        popup.current = new mapboxgl.Popup({ closeButton: false, offset: 18, maxWidth: "280px", className: "vpop" }).setLngLat(e.lngLat).setHTML(popupHtml(v, Date.now(), props.current.mode !== "line")).addTo(map);
-        popup.current.on("close", () => {
-          if (selected.current === k) { selected.current = null; drawSelected(); render(); }
+        // Popup.remove() fires "close" even on a popup that is already closed, so the previous popup's
+        // handler must not clear the new selection (it did when the same vehicle was tapped again).
+        const prev = popup.current;
+        const pp = new mapboxgl.Popup({ closeButton: false, offset: 18, maxWidth: "280px", className: "vpop" }).setLngLat(e.lngLat).setHTML(popupHtml(v, Date.now(), props.current.mode !== "line"));
+        popup.current = pp;
+        prev?.remove();
+        pp.on("close", () => {
+          if (popup.current !== pp) return;
+          popup.current = null;
+          selected.current = null;
+          drawSelected();
+          render();
         });
+        pp.addTo(map);
         drawSelected();
         render();
         try {
@@ -337,7 +357,13 @@ export default function LiveMap(p: LiveMapProps) {
           for (const l of props.current.itinerary.legs) (l.type === "transit" ? l.shape : [[l.from.lon, l.from.lat], [l.to.lon, l.to.lat]]).forEach((c) => b.extend(c as [number, number]));
           map.fitBounds(b, { padding: 40, duration: 0, maxZoom: 15 });
           loadJourney();
-        } else loadExplore();
+        } else {
+          loadExplore();
+          if (props.current.autoLocate && !props.current.focus)
+            geoAllowed().then((ok) => {
+              if (ok && !disposed) geo.trigger();
+            });
+        }
       });
 
       tick = setInterval(render, 1000);
